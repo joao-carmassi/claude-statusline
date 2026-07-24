@@ -1,6 +1,13 @@
 # install-claude-statusline.ps1
 # Instala/atualiza statusline de uso de token (barra colorida) em qualquer Claude Code novo.
 # Uso: powershell -ExecutionPolicy Bypass -File install-claude-statusline.ps1
+#
+# Para Claude/agente executando isto: apenas rode o comando acima num terminal
+# PowerShell. Script detecta $env:CLAUDE_CONFIG_DIR automaticamente (ou usa
+# ~/.claude), escreve hooks\token-usage-statusline.ps1 e mescla a chave
+# statusLine em settings.json sem apagar o resto do arquivo. Compativel com
+# Windows PowerShell 5.1 e PowerShell 7+. Depois de rodar, abrir novo Claude
+# Code para ver a statusline.
 
 $ClaudeDir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME ".claude" }
 $HooksDir = Join-Path $ClaudeDir "hooks"
@@ -70,6 +77,14 @@ if ($TranscriptPath -and (Test-Path -LiteralPath $TranscriptPath)) {
             $line = $Lines[$i]
             if (-not $line -or $line.Trim().Length -eq 0) { continue }
             try { $entry = $line | ConvertFrom-Json -ErrorAction Stop } catch { continue }
+            if ($entry.type -eq 'system' -and $entry.subtype -eq 'compact_boundary' -and $entry.compactMetadata) {
+                $Usage = [PSCustomObject]@{
+                    input_tokens                = $entry.compactMetadata.postTokens
+                    cache_creation_input_tokens = 0
+                    cache_read_input_tokens     = 0
+                }
+                break
+            }
             if ($entry.type -eq 'assistant' -and $entry.message -and $entry.message.usage) {
                 $Usage = $entry.message.usage
                 if ($entry.message.model) { $LastModel = $entry.message.model }
@@ -129,13 +144,17 @@ if (Test-Path $SettingsPath) {
     # backup antes de mexer
     Copy-Item -LiteralPath $SettingsPath -Destination "$SettingsPath.bak" -Force
 
-    $SettingsObj = $Settings | ConvertTo-Json -Depth 20 | ConvertFrom-Json -AsHashtable
-    $SettingsObj["statusLine"] = @{
+    $StatusLineObj = [PSCustomObject]@{
         type            = "command"
         command         = "powershell -ExecutionPolicy Bypass -File `"$ScriptPath`""
         refreshInterval = 5
     }
-    ($SettingsObj | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath $SettingsPath -Encoding UTF8
+    if ($Settings.PSObject.Properties.Name -contains "statusLine") {
+        $Settings.statusLine = $StatusLineObj
+    } else {
+        $Settings | Add-Member -MemberType NoteProperty -Name "statusLine" -Value $StatusLineObj -Force
+    }
+    ($Settings | ConvertTo-Json -Depth 20) | Set-Content -LiteralPath $SettingsPath -Encoding UTF8
     Write-Host "settings.json atualizado (backup em settings.json.bak)."
 } else {
     $NewSettings = @{
