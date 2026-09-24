@@ -25,10 +25,15 @@ try { $Data = [Console]::In.ReadToEnd() | ConvertFrom-Json -ErrorAction Stop } c
 
 $Esc = [char]27
 
-# -- Caveman: CAV verde = ativo, vermelho = inativo ------------------------------
+# -- Caveman: CAV verde = ativo, laranja = desativado, vermelho = nao instalado --
+$ClaudeDirInner = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME ".claude" }
+$CavemanInstalled = $false
+try {
+    $Plugins = Get-Content -LiteralPath (Join-Path $ClaudeDirInner "plugins\installed_plugins.json") -Raw -ErrorAction Stop
+    $CavemanInstalled = $Plugins -match '"caveman@'
+} catch {}
 $CavemanOn = $false
 try {
-    $ClaudeDirInner = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME ".claude" }
     $Flag = Join-Path $ClaudeDirInner ".caveman-active"
     $Item = Get-Item -LiteralPath $Flag -Force -ErrorAction Stop
     if (-not ($Item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -and $Item.Length -le 64) {
@@ -36,7 +41,7 @@ try {
         $CavemanOn = $Mode -ne 'off'
     }
 } catch {}
-$CColor = if ($CavemanOn) { "38;5;114" } else { "38;5;203" }
+$CColor = if (-not $CavemanInstalled) { "38;5;203" } elseif ($CavemanOn) { "38;5;114" } else { "38;5;208" }
 
 # -- Barra [####------] NN% ----------------------------------------------------
 function Format-Bar($pct, $warn = 50, $crit = 60, $warnColor = "38;5;208") {
