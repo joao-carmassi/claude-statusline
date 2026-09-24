@@ -20,105 +20,40 @@ if (-not (Test-Path $HooksDir)) { New-Item -ItemType Directory -Force -Path $Hoo
 $StatuslineContent = @'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-$Input_Json = [Console]::In.ReadToEnd()
 $Data = $null
-try { $Data = $Input_Json | ConvertFrom-Json -ErrorAction Stop } catch {}
-
-$TranscriptPath = if ($Data) { $Data.transcript_path } else { $null }
-$ModelId = if ($Data -and $Data.model) { $Data.model.id } else { $null }
-$ModelName = if ($Data -and $Data.model) { $Data.model.display_name } else { $null }
-$CostUsd = if ($Data -and $Data.cost) { $Data.cost.total_cost_usd } else { $null }
+try { $Data = [Console]::In.ReadToEnd() | ConvertFrom-Json -ErrorAction Stop } catch {}
 
 $Esc = [char]27
 
-# -- Caveman badge ------------------------------------------------------------
-$CavemanBadge = ""
+# -- Caveman: CAV verde = ativo, vermelho = inativo ------------------------------
+$CavemanOn = $false
 try {
     $ClaudeDirInner = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME ".claude" }
     $Flag = Join-Path $ClaudeDirInner ".caveman-active"
     $Item = Get-Item -LiteralPath $Flag -Force -ErrorAction Stop
     if (-not ($Item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -and $Item.Length -le 64) {
-        $Raw = Get-Content -LiteralPath $Flag -TotalCount 1 -ErrorAction Stop
-        $Mode = if ($null -ne $Raw) { ([string]$Raw).Trim().ToLowerInvariant() } else { "" }
-        $Mode = ($Mode -replace '[^a-z0-9-]', '')
-        $Valid = @('off','lite','full','ultra','wenyan-lite','wenyan','wenyan-full','wenyan-ultra','commit','review','compress')
-        if ($Valid -contains $Mode) {
-            if ([string]::IsNullOrEmpty($Mode) -or $Mode -eq "full") {
-                $CavemanBadge = "${Esc}[38;5;172m[CAVEMAN]${Esc}[0m"
-            } else {
-                $CavemanBadge = "${Esc}[38;5;172m[CAVEMAN:$($Mode.ToUpperInvariant())]${Esc}[0m"
-            }
-        }
+        $Mode = ([string](Get-Content -LiteralPath $Flag -TotalCount 1 -ErrorAction Stop)).Trim().ToLowerInvariant()
+        $CavemanOn = $Mode -ne 'off'
     }
 } catch {}
+$CColor = if ($CavemanOn) { "38;5;114" } else { "38;5;203" }
 
-# -- Token usage ---------------------------------------------------------------
-function Get-ContextWindow($modelId) {
-    if ($env:TOKEN_STATUSLINE_CONTEXT_WINDOW) {
-        return [int]$env:TOKEN_STATUSLINE_CONTEXT_WINDOW
-    }
-    if ($modelId -match '1m') { return 1000000 }
-    return 200000
+# -- Barra [####------] NN% ----------------------------------------------------
+function Format-Bar($pct, $warn = 50, $crit = 60, $warnColor = "38;5;208") {
+    if ($null -eq $pct) { return "${Esc}[2m[----------] --%${Esc}[0m" }
+    $Pct = [Math]::Min(100, [Math]::Max(0, [Math]::Round([double]$pct)))
+    $Filled = [Math]::Round($Pct / 10)
+    $Color = "38;5;114"                                   # verde
+    if ($Pct -ge $crit) { $Color = "38;5;203" }           # vermelho
+    elseif ($Pct -ge $warn) { $Color = $warnColor }       # laranja/amarelo
+    return "[${Esc}[${Color}m" + ('#' * $Filled) + "${Esc}[2m" + ('-' * (10 - $Filled)) + "${Esc}[0m] ${Esc}[${Color}m${Pct}%${Esc}[0m"
 }
 
-function Format-Tokens($n) {
-    if ($n -ge 1000000) { return "{0:N1}M" -f ($n / 1000000) }
-    if ($n -ge 1000) { return "{0:N1}k" -f ($n / 1000) }
-    return "$n"
-}
+$CtxPct = if ($Data -and $Data.context_window) { $Data.context_window.used_percentage } else { $null }
+$FivePct = if ($Data -and $Data.rate_limits -and $Data.rate_limits.five_hour) { $Data.rate_limits.five_hour.used_percentage } else { $null }
 
-$Bar = ""
-if ($TranscriptPath -and (Test-Path -LiteralPath $TranscriptPath)) {
-    try {
-        $Lines = Get-Content -LiteralPath $TranscriptPath -Tail 200 -ErrorAction Stop
-        $Usage = $null
-        $LastModel = $null
-        for ($i = $Lines.Count - 1; $i -ge 0; $i--) {
-            $line = $Lines[$i]
-            if (-not $line -or $line.Trim().Length -eq 0) { continue }
-            try { $entry = $line | ConvertFrom-Json -ErrorAction Stop } catch { continue }
-            if ($entry.type -eq 'system' -and $entry.subtype -eq 'compact_boundary' -and $entry.compactMetadata) {
-                $Usage = [PSCustomObject]@{
-                    input_tokens                = $entry.compactMetadata.postTokens
-                    cache_creation_input_tokens = 0
-                    cache_read_input_tokens     = 0
-                }
-                break
-            }
-            if ($entry.type -eq 'assistant' -and $entry.message -and $entry.message.usage) {
-                $Usage = $entry.message.usage
-                if ($entry.message.model) { $LastModel = $entry.message.model }
-                break
-            }
-        }
-        if ($Usage) {
-            $ContextTokens = [int64]($Usage.input_tokens) + [int64]($Usage.cache_creation_input_tokens) + [int64]($Usage.cache_read_input_tokens)
-            $EffectiveModel = if ($ModelId) { $ModelId } else { $LastModel }
-            $Limit = Get-ContextWindow $EffectiveModel
-            $Pct = [Math]::Min(100, [Math]::Round(($ContextTokens / $Limit) * 100))
-
-            $Segments = 20
-            $Filled = [Math]::Round(($Pct / 100) * $Segments)
-            if ($Filled -gt $Segments) { $Filled = $Segments }
-            $EmptyCount = $Segments - $Filled
-
-            $Color = "38;5;114" # green: 0-49%
-            if ($Pct -ge 60) { $Color = "38;5;203" } # red: 60%+
-            elseif ($Pct -ge 50) { $Color = "38;5;208" } # orange: 50-59%
-
-            $FilledChars = "${Esc}[${Color}m" + ('#' * $Filled)
-            $EmptyChars = "${Esc}[2m" + ('-' * $EmptyCount) + "${Esc}[0m"
-            $Bar = "[${FilledChars}${EmptyChars}] ${Esc}[${Color}m${Pct}%${Esc}[0m (${Esc}[2m$(Format-Tokens $ContextTokens)/$(Format-Tokens $Limit)${Esc}[0m)"
-        }
-    } catch {}
-}
-
-$Parts = @()
-if ($CavemanBadge) { $Parts += $CavemanBadge }
-if ($Bar) { $Parts += $Bar }
-if ($ModelName) { $Parts += "${Esc}[2m$ModelName${Esc}[0m" }
-
-[Console]::Write(($Parts -join " "))
+$Sep = " ${Esc}[2m|${Esc}[0m "
+[Console]::Write("${Esc}[${CColor}mCAV${Esc}[0m" + $Sep + "CONT " + (Format-Bar $CtxPct) + $Sep + "LIM " + (Format-Bar $FivePct 75 90 "38;5;220"))
 '@
 
 Set-Content -LiteralPath $ScriptPath -Value $StatuslineContent -Encoding UTF8
