@@ -1,64 +1,99 @@
 # install-claude-statusline.ps1
-# Instala/atualiza statusline de uso de token (barra colorida) em qualquer Claude Code novo.
+# Instala/atualiza statusline de uso de token (barra colorida, em Node) em qualquer Claude Code novo.
 # Uso: powershell -ExecutionPolicy Bypass -File install-claude-statusline.ps1
 #
 # Para Claude/agente executando isto: apenas rode o comando acima num terminal
 # PowerShell. Script detecta $env:CLAUDE_CONFIG_DIR automaticamente (ou usa
-# ~/.claude), escreve hooks\token-usage-statusline.ps1 e mescla a chave
-# statusLine em settings.json sem apagar o resto do arquivo. Compativel com
-# Windows PowerShell 5.1 e PowerShell 7+. Depois de rodar, abrir novo Claude
+# ~/.claude), escreve hooks\token-usage-statusline.js e mescla a chave
+# statusLine em settings.json sem apagar o resto do arquivo. Requer Node.js
+# no PATH. Roda em Windows PowerShell 5.1 e PowerShell 7+. Depois de rodar, abrir novo Claude
 # Code para ver a statusline.
 
 $ClaudeDir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME ".claude" }
 $HooksDir = Join-Path $ClaudeDir "hooks"
-$ScriptPath = Join-Path $HooksDir "token-usage-statusline.ps1"
+$ScriptPath = Join-Path $HooksDir "token-usage-statusline.js"
 $SettingsPath = Join-Path $ClaudeDir "settings.json"
+
+if (-not (Get-Command node -ErrorAction SilentlyContinue)) { Write-Host "AVISO: node nao encontrado no PATH. A statusline precisa de Node.js para rodar." }
 
 if (-not (Test-Path $ClaudeDir)) { New-Item -ItemType Directory -Force -Path $ClaudeDir | Out-Null }
 if (-not (Test-Path $HooksDir)) { New-Item -ItemType Directory -Force -Path $HooksDir | Out-Null }
 
 $StatuslineContent = @'
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+// Port of token-usage-statusline.ps1; output must stay byte-identical to it.
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 
-$Data = $null
-try { $Data = [Console]::In.ReadToEnd() | ConvertFrom-Json -ErrorAction Stop } catch {}
+const ESC = '\x1b';
 
-$Esc = [char]27
+// PowerShell [Math]::Round is half-even; Math.round is half-up.
+function round(x) {
+  const f = Math.floor(x), d = x - f;
+  if (d < 0.5) return f;
+  if (d > 0.5) return f + 1;
+  return f % 2 === 0 ? f : f + 1;
+}
+const clamp = (x) => Math.min(100, Math.max(0, round(x)));
+// PowerShell [double]$null is 0; a non-numeric value throws there, and nothing is printed.
+const dbl = (v) => {
+  const n = v == null ? 0 : Number(v);
+  if (Number.isNaN(n)) throw new Error('not a number');
+  return n;
+};
 
-# -- Caveman: CAV verde = ativo, laranja = desativado, vermelho = nao instalado --
-$ClaudeDirInner = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME ".claude" }
-$CavemanInstalled = $false
+let Data = null;
+try { Data = JSON.parse(fs.readFileSync(0, 'utf8')); } catch {}
+const truthy = (v) => v != null && v !== false && v !== 0 && v !== '' && !(Array.isArray(v) && v.length === 0);
+
+// -- CAV: verde = ativo, laranja = desativado, vermelho = nao instalado --
+const claudeDir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+let installed = false;
 try {
-    $Plugins = Get-Content -LiteralPath (Join-Path $ClaudeDirInner "plugins\installed_plugins.json") -Raw -ErrorAction Stop
-    $CavemanInstalled = $Plugins -match '"caveman@'
+  installed = /"caveman@/i.test(fs.readFileSync(path.join(claudeDir, 'plugins', 'installed_plugins.json'), 'utf8'));
 } catch {}
-$CavemanOn = $false
+let cavOn = false;
 try {
-    $Flag = Join-Path $ClaudeDirInner ".caveman-active"
-    $Item = Get-Item -LiteralPath $Flag -Force -ErrorAction Stop
-    if (-not ($Item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -and $Item.Length -le 64) {
-        $Mode = ([string](Get-Content -LiteralPath $Flag -TotalCount 1 -ErrorAction Stop)).Trim().ToLowerInvariant()
-        $CavemanOn = $Mode -ne 'off'
-    }
+  const flag = path.join(claudeDir, '.caveman-active');
+  const st = fs.lstatSync(flag);
+  if (!st.isSymbolicLink() && (st.isDirectory() || st.size <= 64)) {
+    const txt = fs.readFileSync(flag, 'utf8').replace(/^\uFEFF/, '');
+    // an empty flag file counts as off in the .ps1 (Get-Content yields nothing)
+    cavOn = txt !== '' && txt.split(/\r\n|\r|\n/)[0].trim().toLowerCase() !== 'off';
+  }
 } catch {}
-$CColor = if (-not $CavemanInstalled) { "38;5;203" } elseif ($CavemanOn) { "38;5;114" } else { "38;5;208" }
+const cColor = !installed ? '38;5;203' : cavOn ? '38;5;114' : '38;5;208';
 
-# -- Barra [####------] NN% ----------------------------------------------------
-function Format-Bar($pct, $warn = 50, $crit = 60, $warnColor = "38;5;208") {
-    if ($null -eq $pct) { return "${Esc}[2m[----------] --%${Esc}[0m" }
-    $Pct = [Math]::Min(100, [Math]::Max(0, [Math]::Round([double]$pct)))
-    $Filled = [Math]::Round($Pct / 10)
-    $Color = "38;5;114"                                   # verde
-    if ($Pct -ge $crit) { $Color = "38;5;203" }           # vermelho
-    elseif ($Pct -ge $warn) { $Color = $warnColor }       # laranja/amarelo
-    return "[${Esc}[${Color}m" + ('#' * $Filled) + "${Esc}[2m" + ('-' * (10 - $Filled)) + "${Esc}[0m] ${Esc}[${Color}m${Pct}%${Esc}[0m"
+function bar(pct, warn, crit, warnColor) {
+  if (pct == null) return `${ESC}[2m[----------] --%${ESC}[0m`;
+  const p = clamp(dbl(pct));
+  const filled = round(p / 10);
+  let color = '38;5;114';
+  if (p >= crit) color = '38;5;203';
+  else if (p >= warn) color = warnColor;
+  return `[${ESC}[${color}m` + '#'.repeat(filled) + `${ESC}[${color}m` + '-'.repeat(10 - filled) + `${ESC}[0m] ${ESC}[${color}m${p}%${ESC}[0m`;
 }
 
-$CtxPct = if ($Data -and $Data.context_window) { $Data.context_window.used_percentage } else { $null }
-$FivePct = if ($Data -and $Data.rate_limits -and $Data.rate_limits.five_hour) { $Data.rate_limits.five_hour.used_percentage } else { $null }
+function limBar(five, week) {
+  if (five == null && week == null) return `${ESC}[2m[----------] --% --%${ESC}[0m`;
+  const f = clamp(dbl(five)), w = clamp(dbl(week));
+  const fn = round(f / 10), wn = Math.max(fn, round(w / 10));
+  let fc = '38;5;114';
+  if (f >= 90) fc = '38;5;203'; else if (f >= 75) fc = '38;5;220';
+  const blue = '38;5;75';
+  return `[${ESC}[${fc}m` + '#'.repeat(fn) + `${ESC}[${blue}m` + '#'.repeat(wn - fn) + `${ESC}[${fc}m` + '-'.repeat(10 - wn) + `${ESC}[0m] ${ESC}[${fc}m${f}%${ESC}[0m ${ESC}[${blue}m${w}%${ESC}[0m`;
+}
 
-$Sep = " ${Esc}[2m|${Esc}[0m "
-[Console]::Write("${Esc}[${CColor}mCAV${Esc}[0m" + $Sep + "CONT " + (Format-Bar $CtxPct) + $Sep + "LIM " + (Format-Bar $FivePct 75 90 "38;5;220"))
+const D = truthy(Data) ? Data : null;
+const ctx = D && truthy(D.context_window) ? D.context_window.used_percentage : null;
+const rl = D && truthy(D.rate_limits) ? D.rate_limits : null;
+const five = rl && truthy(rl.five_hour) ? rl.five_hour.used_percentage : null;
+const week = rl && truthy(rl.seven_day) ? rl.seven_day.used_percentage : null;
+
+const sep = ` ${ESC}[2m|${ESC}[0m `;
+try {
+  process.stdout.write(`${ESC}[${cColor}mCAV${ESC}[0m` + sep + 'CONT ' + bar(ctx, 50, 75, '38;5;220') + sep + 'LIM ' + limBar(five, week));
+} catch {}
 '@
 
 Set-Content -LiteralPath $ScriptPath -Value $StatuslineContent -Encoding UTF8
@@ -67,7 +102,7 @@ Write-Host "Statusline script escrito em: $ScriptPath"
 # -- Merge statusLine config em settings.json sem apagar o resto --------------
 $StatusLineConfig = [ordered]@{
     type            = "command"
-    command         = "powershell -ExecutionPolicy Bypass -File `"$ScriptPath`""
+    command         = "node `"$ScriptPath`""
     refreshInterval = 5
 }
 
@@ -86,7 +121,7 @@ if (Test-Path $SettingsPath) {
 
     $StatusLineObj = [PSCustomObject]@{
         type            = "command"
-        command         = "powershell -ExecutionPolicy Bypass -File `"$ScriptPath`""
+        command         = "node `"$ScriptPath`""
         refreshInterval = 5
     }
     if ($Settings.PSObject.Properties.Name -contains "statusLine") {
@@ -100,7 +135,7 @@ if (Test-Path $SettingsPath) {
     $NewSettings = @{
         statusLine = @{
             type            = "command"
-            command         = "powershell -ExecutionPolicy Bypass -File `"$ScriptPath`""
+            command         = "node `"$ScriptPath`""
             refreshInterval = 5
         }
     }
