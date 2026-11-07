@@ -57,7 +57,7 @@ The installer writes this `statusLine` entry:
 ```json
 "statusLine": {
   "type": "command",
-  "command": "node \"<folder>\hooks\token-usage-statusline.js\"",
+  "command": "node \"<folder>\\hooks\\token-usage-statusline.js\"",
   "refreshInterval": 5
 }
 ```
@@ -76,7 +76,7 @@ To share one script between accounts (for example `~/.claude` and `~/.claude-qf`
 To undo, restore `settings.json.bak`, or switch `command` back to the PowerShell version:
 
 ```json
-"command": "powershell -ExecutionPolicy Bypass -File \"<folder>\hooks\token-usage-statusline.ps1\""
+"command": "powershell -ExecutionPolicy Bypass -File \"<folder>\\hooks\\token-usage-statusline.ps1\""
 ```
 
 ## License
