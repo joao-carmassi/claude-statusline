@@ -1,94 +1,87 @@
-# claude-statusline
+# Claude Statusline
 
-Status line colorida para o [Claude Code](https://claude.com/claude-code), escrita em Node.js.
+Colorful Claude Code status line showing caveman state, context usage and 5-hour/weekly rate limits
 
-```
-CAV | CONT [######----] 55% | LIM [########--] 80% 30%
-```
+![Claude Statusline screenshot](docs/screenshot.png)
 
-| Trecho | O que mostra |
-|---|---|
-| `CAV` | Estado do plugin caveman: verde = ativo, laranja = desativado, vermelho = não instalado |
-| `CONT` | Uso da janela de contexto |
-| `LIM` | Limite de 5 horas (barra e primeiro `%`) e limite semanal (trecho azul e segundo `%`) |
+## Features
 
-## Instalação
+- Shows context window usage as a 10-block bar, colored green, yellow or red by threshold.
+- Shows the 5-hour rate limit as a bar, with the weekly limit drawn in blue on the same bar.
+- Shows the state of the caveman plugin: green = active, orange = disabled, red = not installed.
+- Falls back to dimmed empty bars when the data is missing or the JSON is invalid.
+- Runs in about 50 ms per refresh (Node), versus about 240-460 ms for PowerShell.
+- Works with several accounts by reading `CLAUDE_CONFIG_DIR`.
 
-Requer **Node.js** no `PATH` e Windows PowerShell 5.1 ou PowerShell 7+.
+## Tech stack
 
-```powershell
+- Node.js: the status line script (`token-usage-statusline.js`)
+- PowerShell 5.1 / 7+: the installer, plus a reference port with identical output (`token-usage-statusline.ps1`)
+
+## Getting started
+
+### Prerequisites
+
+- Node.js on the `PATH`
+- Windows PowerShell 5.1 or PowerShell 7+
+- Claude Code
+
+### Install
+
+```sh
+git clone https://github.com/joao-carmassi/claude-statusline.git
+cd claude-statusline
 powershell -ExecutionPolicy Bypass -File install-claude-statusline.ps1
 ```
 
-O instalador:
+The installer uses `$env:CLAUDE_CONFIG_DIR` (or `~/.claude`), writes `hooks/token-usage-statusline.js` there, and merges a `statusLine` key into `settings.json` without touching the rest (a `settings.json.bak` is kept). Then open a new Claude Code session.
 
-1. usa `$env:CLAUDE_CONFIG_DIR` (ou `~/.claude`) como pasta de configuração;
-2. escreve `hooks/token-usage-statusline.js` nessa pasta;
-3. mescla a chave `statusLine` no `settings.json`, sem apagar o resto, e guarda um `settings.json.bak`.
+## Usage
 
-Depois abra um novo Claude Code. A configuração gravada é:
+Claude Code runs the command every 5 seconds and pipes a JSON object to stdin. The script reads `context_window.used_percentage`, `rate_limits.five_hour.used_percentage` and `rate_limits.seven_day.used_percentage`, then prints one ANSI-colored line. Try it by hand:
+
+```sh
+echo '{"context_window":{"used_percentage":32},"rate_limits":{"five_hour":{"used_percentage":40},"seven_day":{"used_percentage":70}}}' | node token-usage-statusline.js
+```
+
+| Segment | Meaning |
+|---|---|
+| `CAV` | Caveman plugin state: green = active, orange = disabled, red = not installed |
+| `CONT` | Context window usage |
+| `LIM` | 5-hour limit (bar and first %) and weekly limit (blue part and second %) |
+
+## Configuration
+
+The installer writes this `statusLine` entry:
 
 ```json
 "statusLine": {
   "type": "command",
-  "command": "node \"<pasta>\\hooks\\token-usage-statusline.js\"",
+  "command": "node \"<folder>\hooks\token-usage-statusline.js\"",
   "refreshInterval": 5
 }
 ```
 
-Para usar o mesmo script em duas contas (por exemplo `~/.claude` e `~/.claude-qf`), aponte o `command` das duas para o mesmo `.js`. O script lê `CLAUDE_CONFIG_DIR` para saber qual conta está rodando.
+Bars are 10 blocks, each worth 10%. Filled and empty blocks share the bar color.
 
-## Cores
-
-As barras têm `#` preenchidos e `-` vazios, e **os dois usam a mesma cor** da barra. Cada um dos 10 blocos vale 10%.
-
-| Barra | Verde | Amarelo | Vermelho |
+| Bar | Green | Yellow | Red |
 |---|---|---|---|
-| `CONT` | abaixo de 50% | 50% a 74% | 75% ou mais |
-| `LIM` (5h) | abaixo de 75% | 75% a 89% | 90% ou mais |
+| `CONT` | below 50% | 50% to 74% | 75% or more |
+| `LIM` (5h) | below 75% | 75% to 89% | 90% or more |
 
-No `LIM`, o trecho do limite semanal fica **sempre azul**, qualquer que seja a cor do limite de 5h. Ele é desenhado depois dos blocos de 5h, até o ponto que o uso semanal alcança.
+The weekly part of `LIM` is always blue. With no data the bar is dimmed: `[----------] --%`.
 
-Sem dados (campo ausente), a barra aparece apagada: `[----------] --%`.
+To share one script between accounts (for example `~/.claude` and `~/.claude-qf`), point both `command` entries at the same `.js`; it reads `CLAUDE_CONFIG_DIR` to know which account is running.
 
-## Como funciona
-
-O Claude Code executa o `command` a cada 5 segundos (`refreshInterval`) e envia um JSON pelo stdin. O script usa estes campos:
-
-- `context_window.used_percentage`
-- `rate_limits.five_hour.used_percentage`
-- `rate_limits.seven_day.used_percentage`
-
-e imprime uma linha com códigos de cor ANSI, sem quebra de linha no final. Se o JSON for inválido ou faltar campo, imprime as barras apagadas.
-
-O arredondamento é *half-even* (45 → 4, 25 → 2), igual ao `[Math]::Round` do PowerShell, para manter a saída idêntica à versão em PowerShell.
-
-## Por que Node
-
-A versão em PowerShell (`token-usage-statusline.ps1`, mantida como referência) sobe um processo `powershell` novo a cada atualização. Medido no Windows 11, 30 execuções cada, com `refreshInterval` de 5 s:
-
-| Versão | Tempo médio | CPU por execução | CPU por hora |
-|---|---|---|---|
-| PowerShell 5.1 (comando original) | 458 ms | 435 ms | 314 s |
-| PowerShell 5.1 com `-NoProfile -NoLogo` | 238 ms | 263 ms | 189 s |
-| **Node** | **52 ms** | **36 ms** | **26 s** |
-
-Com 6 execuções em paralelo, o Node leva 124 ms contra 687 ms do comando original em PowerShell.
-
-A saída do `.js` foi comparada byte a byte com a do `.ps1` em 49 casos: entrada vazia, `{}`, JSON inválido, valores nos limites de arredondamento e fora da faixa, campos faltando ou nulos, e vários estados do arquivo `.caveman-active`. A única diferença conhecida é texto não numérico em `used_percentage` (`"abc"`), que o Claude Code não envia.
-
-## Arquivos
-
-| Arquivo | Função |
-|---|---|
-| `token-usage-statusline.js` | A status line (usada pelo instalador) |
-| `token-usage-statusline.ps1` | Versão em PowerShell (mesma saída), só como referência |
-| `install-claude-statusline.ps1` | Instalador. Embute o conteúdo do `.js`: ao editar o `.js`, atualize também o bloco `$StatuslineContent` |
-
-## Desfazer
-
-Restaure o `settings.json.bak` ou volte o `command` para a versão em PowerShell:
+To undo, restore `settings.json.bak`, or switch `command` back to the PowerShell version:
 
 ```json
-"command": "powershell -ExecutionPolicy Bypass -File \"<pasta>\\hooks\\token-usage-statusline.ps1\""
+"command": "powershell -ExecutionPolicy Bypass -File \"<folder>\hooks\token-usage-statusline.ps1\""
 ```
+
+## License
+
+No license specified.
+
+---
+Made by [João Carmassi](https://github.com/joao-carmassi)
